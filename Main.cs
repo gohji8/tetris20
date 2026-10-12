@@ -1,6 +1,6 @@
 using Godot;
 
-public partial class Main : Node2D
+public partial class Main : Node3D
 {
     private readonly TetrisBoard board = new();
     private GameRenderer renderer;
@@ -198,6 +198,6 @@ public partial class Main : Node2D
             return;
         }
 
-        hud.UpdateLayout(GetViewportRect().Size, renderer.BoardOffset, renderer.CellSize);
+        hud.UpdateLayout(GetViewport().GetVisibleRect().Size, renderer.BoardOffset, renderer.CellSize);
     }
 }

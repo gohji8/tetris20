@@ -1,41 +1,61 @@
 using Godot;
 using System;
 
-public partial class GameRenderer : Node2D
+public partial class GameRenderer : Node3D
 {
-    private const float MaxCellSize = 32f;
-    private const float LayoutMargin = 24f;
-    private const float HudWidth = 190f;
-    private const float HudGap = 32f;
+    private const float BoardWorldWidth = TetrisBoard.Width;
+    private const float BoardWorldHeight = TetrisBoard.Height;
+    private const float ViewHeight = 22.5f;
+    private const float HudWidthPixels = 190f;
+    private const float HudGapPixels = 32f;
+    private const float LayoutMarginPixels = 24f;
 
     private readonly Color[] pieceColors =
     {
         new Color(0f, 0f, 0f, 0f),
-        new Color(0.18f, 0.88f, 0.99f, 1f),
-        new Color(0.97f, 0.94f, 0.32f, 1f),
-        new Color(0.32f, 0.52f, 0.97f, 1f),
-        new Color(0.98f, 0.62f, 0.23f, 1f),
-        new Color(0.72f, 0.42f, 0.97f, 1f),
-        new Color(0.29f, 0.84f, 0.48f, 1f),
-        new Color(0.96f, 0.24f, 0.34f, 1f)
+        new Color(0.18f, 0.88f, 0.99f),
+        new Color(0.97f, 0.94f, 0.32f),
+        new Color(0.32f, 0.52f, 0.97f),
+        new Color(0.98f, 0.62f, 0.23f),
+        new Color(0.72f, 0.42f, 0.97f),
+        new Color(0.29f, 0.84f, 0.48f),
+        new Color(0.96f, 0.24f, 0.34f)
     };
 
+    private readonly MeshInstance3D[,] settledBlocks = new MeshInstance3D[TetrisBoard.Width, TetrisBoard.Height];
+    private readonly MeshInstance3D[] activeBlocks = new MeshInstance3D[4];
+    private readonly MeshInstance3D[] ghostBlocks = new MeshInstance3D[4];
+    private readonly MeshInstance3D[] nextBlocks = new MeshInstance3D[4];
+    private readonly StandardMaterial3D[] pieceMaterials = new StandardMaterial3D[8];
+
     private TetrisBoard board;
+    private Camera3D camera;
+    private ColorRect dimOverlay;
+    private StandardMaterial3D ghostMaterial;
+    private StandardMaterial3D landingMaterial;
+    private MeshInstance3D landingPulse;
     private Vector2 lastViewportSize = new(-1, -1);
+    private Vector2 cameraTarget;
     private float flashTimer;
+    private float landingEffectTimer;
     private int[] flashingRows = Array.Empty<int>();
     private bool showDimOverlay = true;
-    private Vector2I[] landingCells = Array.Empty<Vector2I>();
-    private float landingEffectTimer;
 
-    public float CellSize { get; private set; } = MaxCellSize;
+    public float CellSize { get; private set; }
     public Vector2 BoardOffset { get; private set; }
+
+    public override void _Ready()
+    {
+        CreateWorld();
+        CreateBlockMeshes();
+        CreateDimOverlay();
+    }
 
     public void Initialize(TetrisBoard gameBoard)
     {
         board = gameBoard;
         UpdateLayout();
-        QueueRedraw();
+        UpdateBoardMeshes();
     }
 
     public override void _Process(double delta)
@@ -43,7 +63,7 @@ public partial class GameRenderer : Node2D
         UpdateLayout();
         flashTimer = Math.Max(0f, flashTimer - (float)delta);
         landingEffectTimer = Math.Max(0f, landingEffectTimer - (float)delta);
-        QueueRedraw();
+        UpdateBoardMeshes();
     }
 
     public void ShowLineClear(int[] rows)
@@ -54,205 +74,377 @@ public partial class GameRenderer : Node2D
 
     public void ShowPieceLanding(Vector2I position, int[,] shape)
     {
-        var cells = new System.Collections.Generic.List<Vector2I>();
-        for (int y = 0; y < shape.GetLength(0); y++)
-        {
-            for (int x = 0; x < shape.GetLength(1); x++)
-            {
-                int boardY = position.Y + y;
-                if (shape[y, x] != 0 && boardY >= 0)
-                {
-                    cells.Add(new Vector2I(position.X + x, boardY));
-                }
-            }
-        }
-
-        landingCells = cells.ToArray();
-        landingEffectTimer = 0.22f;
-    }
-
-    public void SetDimOverlay(bool visible)
-    {
-        showDimOverlay = visible;
-        QueueRedraw();
-    }
-
-    public override void _Draw()
-    {
-        DrawBackground();
-        DrawBoardFrame();
-        DrawGrid();
-
-        for (int x = 0; x < TetrisBoard.Width; x++)
-        {
-            for (int y = 0; y < TetrisBoard.Height; y++)
-            {
-                int type = board.Cells[x, y];
-                if (type != 0)
-                {
-                    DrawCell(x, y, type, 1f);
-                }
-            }
-        }
-
-        if (board.CurrentShape != null)
-        {
-            DrawPiece(board.CurrentShape, board.GetGhostPosition(), board.CurrentType, 0.18f);
-            DrawPiece(board.CurrentShape, board.CurrentPosition, board.CurrentType, 1f);
-        }
-
-        DrawLineFlashes();
-        DrawLandingEffect();
-        DrawNextPiece();
-        if (showDimOverlay)
-        {
-            DrawRect(new Rect2(Vector2.Zero, GetViewportRect().Size), new Color(0.015f, 0.025f, 0.08f, 0.58f));
-        }
-    }
-
-    private void UpdateLayout()
-    {
-        Vector2 viewportSize = GetViewportRect().Size;
-        if (viewportSize == lastViewportSize)
-        {
-            return;
-        }
-
-        lastViewportSize = viewportSize;
-        float availableHeight = Math.Max(1f, viewportSize.Y - LayoutMargin * 2f);
-        float availableWidth = Math.Max(1f, viewportSize.X - LayoutMargin * 2f - HudGap - HudWidth);
-        CellSize = Math.Min(MaxCellSize, Math.Min(availableHeight / TetrisBoard.Height, availableWidth / TetrisBoard.Width));
-
-        float contentWidth = TetrisBoard.Width * CellSize + HudGap + HudWidth;
-        float contentHeight = TetrisBoard.Height * CellSize;
-        BoardOffset = new Vector2(
-            Math.Max(LayoutMargin, (viewportSize.X - contentWidth) / 2f),
-            Math.Max(0f, (viewportSize.Y - contentHeight) / 2f));
-    }
-
-    private void DrawBackground()
-    {
-        Vector2 viewportSize = GetViewportRect().Size;
-        DrawRect(new Rect2(Vector2.Zero, viewportSize), new Color(0.08f, 0.09f, 0.17f, 1f));
-        for (int i = 0; i < 16; i++)
-        {
-            float y = i * 48f;
-            float alpha = 0.07f + i * 0.005f;
-            DrawRect(new Rect2(0, y, viewportSize.X, 30f), new Color(0.26f, 0.33f, 0.72f, alpha));
-        }
-        DrawRect(new Rect2(0, 0, viewportSize.X, viewportSize.Y), new Color(0.02f, 0.04f, 0.08f, 1f), false);
-    }
-
-    private void DrawBoardFrame()
-    {
-        Rect2 area = new(BoardOffset.X - 12, BoardOffset.Y - 12, TetrisBoard.Width * CellSize + 24, TetrisBoard.Height * CellSize + 24);
-        DrawRect(area, new Color(0.12f, 0.16f, 0.27f, 0.85f));
-        DrawRect(area, new Color(0.57f, 0.75f, 1f, 0.18f), false);
-    }
-
-    private void DrawGrid()
-    {
-        for (int x = 0; x <= TetrisBoard.Width; x++)
-        {
-            float gx = BoardOffset.X + x * CellSize;
-            DrawLine(new Vector2(gx, BoardOffset.Y), new Vector2(gx, BoardOffset.Y + TetrisBoard.Height * CellSize), new Color(0.70f, 0.80f, 1f, 0.10f));
-        }
-
-        for (int y = 0; y <= TetrisBoard.Height; y++)
-        {
-            float gy = BoardOffset.Y + y * CellSize;
-            DrawLine(new Vector2(BoardOffset.X, gy), new Vector2(BoardOffset.X + TetrisBoard.Width * CellSize, gy), new Color(0.70f, 0.80f, 1f, 0.10f));
-        }
-    }
-
-    private void DrawPiece(int[,] shape, Vector2I origin, int type, float alpha)
-    {
-        for (int y = 0; y < shape.GetLength(0); y++)
-        {
-            for (int x = 0; x < shape.GetLength(1); x++)
-            {
-                if (shape[y, x] == 0)
-                {
-                    continue;
-                }
-
-                int boardY = origin.Y + y;
-                if (boardY >= 0)
-                {
-                    DrawCell(origin.X + x, boardY, type, alpha);
-                }
-            }
-        }
-    }
-
-    private void DrawCell(int boardX, int boardY, int type, float alpha)
-    {
-        Color color = pieceColors[type];
-        float x = BoardOffset.X + boardX * CellSize;
-        float y = BoardOffset.Y + boardY * CellSize;
-        float inset = Math.Max(1f, CellSize * 0.06f);
-        float highlight = CellSize * 0.25f;
-        DrawRect(new Rect2(x + inset, y + inset, CellSize - inset * 2f, CellSize - inset * 2f), new Color(color.R, color.G, color.B, alpha));
-        DrawRect(new Rect2(x + highlight, y + highlight, CellSize - highlight * 2f, CellSize - highlight * 2f), new Color(1f, 1f, 1f, 0.14f * alpha));
-    }
-
-    private void DrawNextPiece()
-    {
-        int[,] shape = TetrisBoard.Shapes[board.NextType];
-        float size = Math.Min(20f, CellSize * 0.72f);
-        float startX = BoardOffset.X + TetrisBoard.Width * CellSize + HudGap;
-        float startY = BoardOffset.Y + 274f;
-        Color color = pieceColors[board.NextType];
+        float lowestRow = position.Y;
         for (int y = 0; y < shape.GetLength(0); y++)
         {
             for (int x = 0; x < shape.GetLength(1); x++)
             {
                 if (shape[y, x] != 0)
                 {
-                    float inset = Math.Max(1f, size * 0.07f);
-                    DrawRect(new Rect2(startX + x * size + inset, startY + y * size + inset, size - inset * 2f, size - inset * 2f), color);
+                    lowestRow = Math.Max(lowestRow, position.Y + y);
                 }
             }
         }
+
+        landingPulse.Position = new Vector3(0f, BoardWorldHeight / 2f - lowestRow - 0.5f, 0.22f);
+        landingPulse.Visible = true;
+        landingEffectTimer = 0.22f;
     }
 
-    private void DrawLineFlashes()
+    public void SetDimOverlay(bool visible)
     {
-        if (flashTimer <= 0f)
+        showDimOverlay = visible;
+        if (dimOverlay != null)
+        {
+            dimOverlay.Visible = visible;
+        }
+    }
+
+    private void CreateWorld()
+    {
+        camera = new Camera3D
+        {
+            Projection = Camera3D.ProjectionType.Orthogonal,
+            Size = ViewHeight,
+            Current = true
+        };
+        AddChild(camera);
+
+        var environment = new Godot.Environment
+        {
+            BackgroundMode = Godot.Environment.BGMode.Color,
+            BackgroundColor = new Color(0.035f, 0.045f, 0.09f),
+            AmbientLightSource = Godot.Environment.AmbientSource.Color,
+            AmbientLightColor = new Color(0.55f, 0.62f, 0.82f),
+            AmbientLightEnergy = 0.65f,
+            TonemapMode = Godot.Environment.ToneMapper.Filmic
+        };
+        camera.Environment = environment;
+
+        var keyLight = new DirectionalLight3D
+        {
+            RotationDegrees = new Vector3(-25f, -28f, 0f),
+            LightColor = new Color(0.72f, 0.84f, 1f),
+            LightEnergy = 1.05f,
+            ShadowEnabled = true
+        };
+        AddChild(keyLight);
+
+        var fillLight = new OmniLight3D
+        {
+            Position = new Vector3(3f, 7f, 8f),
+            LightColor = new Color(0.44f, 0.28f, 1f),
+            LightEnergy = 1.4f,
+            OmniRange = 22f
+        };
+        AddChild(fillLight);
+
+        AddBoardBacking();
+    }
+
+    private void CreateDimOverlay()
+    {
+        var canvasLayer = new CanvasLayer { Layer = -1 };
+        AddChild(canvasLayer);
+        dimOverlay = new ColorRect
+        {
+            Color = new Color(0.015f, 0.025f, 0.08f, 0.58f),
+            MouseFilter = Control.MouseFilterEnum.Ignore,
+            Visible = showDimOverlay
+        };
+        dimOverlay.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);
+        canvasLayer.AddChild(dimOverlay);
+    }
+
+    private void AddBoardBacking()
+    {
+        var backing = new MeshInstance3D
+        {
+            Name = "BoardBacking",
+            Mesh = new BoxMesh { Size = new Vector3(BoardWorldWidth + 0.35f, BoardWorldHeight + 0.35f, 0.28f) },
+            Position = new Vector3(0f, 0f, -0.35f),
+            MaterialOverride = new StandardMaterial3D
+            {
+                AlbedoColor = new Color(0.035f, 0.055f, 0.11f),
+                Metallic = 0.25f,
+                Roughness = 0.38f,
+                EmissionEnabled = true,
+                Emission = new Color(0.025f, 0.06f, 0.16f),
+                EmissionEnergyMultiplier = 0.7f
+            }
+        };
+        AddChild(backing);
+
+        var gridMesh = new ImmediateMesh();
+        gridMesh.SurfaceBegin(Mesh.PrimitiveType.Lines);
+        for (int x = 0; x <= TetrisBoard.Width; x++)
+        {
+            float worldX = x - BoardWorldWidth / 2f;
+            gridMesh.SurfaceAddVertex(new Vector3(worldX, -BoardWorldHeight / 2f, -0.19f));
+            gridMesh.SurfaceAddVertex(new Vector3(worldX, BoardWorldHeight / 2f, -0.19f));
+        }
+        for (int y = 0; y <= TetrisBoard.Height; y++)
+        {
+            float worldY = BoardWorldHeight / 2f - y;
+            gridMesh.SurfaceAddVertex(new Vector3(-BoardWorldWidth / 2f, worldY, -0.19f));
+            gridMesh.SurfaceAddVertex(new Vector3(BoardWorldWidth / 2f, worldY, -0.19f));
+        }
+        gridMesh.SurfaceEnd();
+
+        var grid = new MeshInstance3D
+        {
+            Name = "BoardGrid",
+            Mesh = gridMesh,
+            MaterialOverride = new StandardMaterial3D
+            {
+                ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+                AlbedoColor = new Color(0.3f, 0.52f, 0.82f, 0.35f),
+                Transparency = BaseMaterial3D.TransparencyEnum.Alpha
+            }
+        };
+        AddChild(grid);
+    }
+
+    private void CreateBlockMeshes()
+    {
+        for (int type = 1; type < pieceMaterials.Length; type++)
+        {
+            pieceMaterials[type] = new StandardMaterial3D
+            {
+                AlbedoColor = pieceColors[type],
+                Metallic = 0.28f,
+                Roughness = 0.3f,
+                EmissionEnabled = true,
+                Emission = pieceColors[type] * 0.12f,
+                EmissionEnergyMultiplier = 0.7f
+            };
+        }
+
+        var blockMesh = new BoxMesh { Size = new Vector3(0.9f, 0.9f, 0.62f) };
+        for (int x = 0; x < TetrisBoard.Width; x++)
+        {
+            for (int y = 0; y < TetrisBoard.Height; y++)
+            {
+                var block = new MeshInstance3D { Mesh = blockMesh, Visible = false };
+                AddChild(block);
+                settledBlocks[x, y] = block;
+            }
+        }
+
+        for (int i = 0; i < activeBlocks.Length; i++)
+        {
+            activeBlocks[i] = new MeshInstance3D { Mesh = blockMesh, Visible = false };
+            ghostBlocks[i] = new MeshInstance3D { Mesh = blockMesh, Visible = false };
+            nextBlocks[i] = new MeshInstance3D { Mesh = blockMesh, Visible = false };
+            AddChild(ghostBlocks[i]);
+            AddChild(activeBlocks[i]);
+            AddChild(nextBlocks[i]);
+        }
+
+        ghostMaterial = new StandardMaterial3D
+        {
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            AlbedoColor = new Color(0.52f, 0.78f, 1f, 0.2f),
+            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+            EmissionEnabled = true,
+            Emission = new Color(0.18f, 0.5f, 0.9f),
+            EmissionEnergyMultiplier = 0.4f
+        };
+
+        var pulseMesh = new BoxMesh { Size = new Vector3(BoardWorldWidth * 0.92f, 0.09f, 0.035f) };
+        landingMaterial = new StandardMaterial3D
+        {
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+            AlbedoColor = new Color(0.55f, 0.9f, 1f, 0.52f),
+            Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+            EmissionEnabled = true,
+            Emission = new Color(0.3f, 0.8f, 1f),
+            EmissionEnergyMultiplier = 0.75f
+        };
+        landingPulse = new MeshInstance3D
+        {
+            Mesh = pulseMesh,
+            MaterialOverride = landingMaterial,
+            Visible = false
+        };
+        AddChild(landingPulse);
+    }
+
+    private void UpdateLayout()
+    {
+        Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
+        if (viewportSize == lastViewportSize)
         {
             return;
         }
 
-        float strength = flashTimer / 0.24f;
-        strength *= strength;
-        foreach (int row in flashingRows)
+        lastViewportSize = viewportSize;
+        float pixelsPerWorldUnit = viewportSize.Y / ViewHeight;
+        float desiredCellSize = Math.Min(
+            pixelsPerWorldUnit,
+            Math.Max(1f, (viewportSize.Y - LayoutMarginPixels * 2f) / TetrisBoard.Height));
+        CellSize = desiredCellSize;
+
+        float hudAndBoardWidth = TetrisBoard.Width * CellSize + HudGapPixels + HudWidthPixels;
+        BoardOffset = new Vector2(
+            Math.Max(LayoutMarginPixels, (viewportSize.X - hudAndBoardWidth) / 2f),
+            (viewportSize.Y - TetrisBoard.Height * CellSize) / 2f);
+
+        float boardCenterScreenX = BoardOffset.X + TetrisBoard.Width * CellSize / 2f;
+        float boardCenterScreenY = BoardOffset.Y + TetrisBoard.Height * CellSize / 2f;
+        float targetX = (viewportSize.X / 2f - boardCenterScreenX) / pixelsPerWorldUnit;
+        float targetY = (boardCenterScreenY - viewportSize.Y / 2f) / pixelsPerWorldUnit;
+        cameraTarget = new Vector2(targetX, targetY);
+
+        if (camera != null)
         {
-            float y = BoardOffset.Y + row * CellSize;
-            DrawRect(new Rect2(BoardOffset.X - 4f, y - 4f, TetrisBoard.Width * CellSize + 8f, CellSize + 8f), new Color(0.34f, 0.92f, 1f, strength * 0.28f));
-            DrawRect(new Rect2(BoardOffset.X, y + CellSize * 0.42f, TetrisBoard.Width * CellSize, CellSize * 0.16f), new Color(0.86f, 0.98f, 1f, strength * 0.52f));
+            var target = new Vector3(targetX, targetY, 0f);
+            camera.Position = target + new Vector3(0f, 0f, 32f);
+            camera.LookAt(target, Vector3.Up);
         }
     }
 
-    private void DrawLandingEffect()
+    private void UpdateBoardMeshes()
     {
-        if (landingEffectTimer <= 0f)
+        if (board == null)
+        {
+            return;
+        }
+
+        for (int x = 0; x < TetrisBoard.Width; x++)
+        {
+            for (int y = 0; y < TetrisBoard.Height; y++)
+            {
+                MeshInstance3D block = settledBlocks[x, y];
+                int type = board.Cells[x, y];
+                block.Visible = type != 0;
+                if (type == 0)
+                {
+                    continue;
+                }
+
+                block.Position = CellCenter(x, y, 0.08f);
+                block.MaterialOverride = pieceMaterials[type];
+            }
+        }
+
+        UpdatePieceMeshes(board.CurrentShape, board.CurrentPosition, board.CurrentType, activeBlocks, null, 0.18f);
+        if (board.CurrentShape != null)
+        {
+            UpdatePieceMeshes(board.CurrentShape, board.GetGhostPosition(), board.CurrentType, ghostBlocks, ghostMaterial, 0.18f);
+        }
+        else
+        {
+            HideMeshes(ghostBlocks);
+        }
+
+        UpdatePreviewMeshes();
+        UpdateLandingPulse();
+    }
+
+    private void UpdatePieceMeshes(int[,] shape, Vector2I origin, int type, MeshInstance3D[] meshes, Material material, float z)
+    {
+        int index = 0;
+        if (shape != null)
+        {
+            for (int y = 0; y < shape.GetLength(0); y++)
+            {
+                for (int x = 0; x < shape.GetLength(1); x++)
+                {
+                    int boardY = origin.Y + y;
+                    if (shape[y, x] == 0 || boardY < 0 || index >= meshes.Length)
+                    {
+                        continue;
+                    }
+
+                    MeshInstance3D block = meshes[index++];
+                    block.Visible = true;
+                    block.Position = CellCenter(origin.X + x, boardY, z);
+                    block.MaterialOverride = material ?? pieceMaterials[type];
+                }
+            }
+        }
+
+        for (; index < meshes.Length; index++)
+        {
+            meshes[index].Visible = false;
+        }
+    }
+
+    private void UpdatePreviewMeshes()
+    {
+        if (board == null)
+        {
+            HideMeshes(nextBlocks);
+            return;
+        }
+
+        int[,] shape = TetrisBoard.Shapes[board.NextType];
+        Vector2 viewport = GetViewport().GetVisibleRect().Size;
+        float pixelsPerWorldUnit = viewport.Y / ViewHeight;
+        float previewCell = Math.Min(20f, CellSize * 0.72f) / pixelsPerWorldUnit;
+        float screenStartX = BoardOffset.X + TetrisBoard.Width * CellSize + HudGapPixels;
+        float screenStartY = BoardOffset.Y + 274f;
+        Vector2 topLeft = ScreenToWorld(screenStartX, screenStartY, viewport, pixelsPerWorldUnit);
+
+        int index = 0;
+        for (int y = 0; y < shape.GetLength(0); y++)
+        {
+            for (int x = 0; x < shape.GetLength(1); x++)
+            {
+                if (shape[y, x] == 0 || index >= nextBlocks.Length)
+                {
+                    continue;
+                }
+
+                MeshInstance3D block = nextBlocks[index++];
+                block.Visible = true;
+                block.Position = new Vector3(
+                    topLeft.X + x * previewCell + previewCell / 2f,
+                    topLeft.Y - y * previewCell - previewCell / 2f,
+                    0.1f);
+                block.Scale = new Vector3(previewCell * 0.82f, previewCell * 0.82f, 0.62f);
+                block.MaterialOverride = pieceMaterials[board.NextType];
+            }
+        }
+
+        for (; index < nextBlocks.Length; index++)
+        {
+            nextBlocks[index].Visible = false;
+            nextBlocks[index].Scale = Vector3.One;
+        }
+    }
+
+    private void UpdateLandingPulse()
+    {
+        landingPulse.Visible = landingEffectTimer > 0f;
+        if (!landingPulse.Visible)
         {
             return;
         }
 
         float progress = 1f - landingEffectTimer / 0.22f;
-        float alpha = (1f - progress) * 0.38f;
-        float inset = progress * CellSize * 0.18f;
-        foreach (Vector2I cell in landingCells)
+        landingPulse.Scale = new Vector3(0.75f + progress * 0.35f, 1f, 1f);
+        landingMaterial.AlbedoColor = new Color(0.55f, 0.9f, 1f, (1f - progress) * 0.4f);
+    }
+
+    private Vector3 CellCenter(int x, int y, float z)
+    {
+        return new Vector3(x - BoardWorldWidth / 2f + 0.5f, BoardWorldHeight / 2f - y - 0.5f, z);
+    }
+
+    private Vector2 ScreenToWorld(float x, float y, Vector2 viewport, float pixelsPerWorldUnit)
+    {
+        return new Vector2(
+            cameraTarget.X + (x - viewport.X / 2f) / pixelsPerWorldUnit,
+            cameraTarget.Y + (viewport.Y / 2f - y) / pixelsPerWorldUnit);
+    }
+
+    private static void HideMeshes(MeshInstance3D[] meshes)
+    {
+        foreach (MeshInstance3D mesh in meshes)
         {
-            float x = BoardOffset.X + cell.X * CellSize + inset;
-            float y = BoardOffset.Y + cell.Y * CellSize + inset;
-            float size = CellSize - inset * 2f;
-            DrawRect(
-                new Rect2(x, y, size, size),
-                new Color(0.85f, 0.95f, 1f, alpha),
-                false,
-                Math.Max(1f, CellSize * 0.06f));
+            mesh.Visible = false;
         }
     }
 }
